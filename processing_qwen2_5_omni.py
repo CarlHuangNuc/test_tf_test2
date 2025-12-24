@@ -111,6 +111,13 @@ class Qwen2_5OmniProcessor(ProcessorMixin):
         self.audio_bos_token = self.tokenizer.audio_bos_token
         self.audio_eos_token = self.tokenizer.audio_eos_token
 
+        #### carl add
+        self.stream = False
+        self.pre_text_prompt = False
+        self.first_slice = False
+        self.end_slice = False
+
+
     def __call__(
         self,
         text: Union[TextInput, PreTokenizedInput, List[TextInput], List[PreTokenizedInput]] = None,
@@ -151,6 +158,15 @@ class Qwen2_5OmniProcessor(ProcessorMixin):
             tokenizer_init_kwargs=self.tokenizer.init_kwargs,
             **kwargs,
         )
+        if "stream" in kwargs:          
+            self.stream = kwargs["stream"]       
+        if "pre_text_prompt" in kwargs:
+            self.pre_text_prompt = kwargs["pre_text_prompt"]
+        if "first_slice" in kwargs:
+            self.first_slice = kwargs["first_slice"]
+        if "end_slice" in kwargs:          
+            self.end_slice = kwargs["end_slice"]
+
 
         seconds_per_chunk = output_kwargs["videos_kwargs"].pop("seconds_per_chunk")
         position_id_per_seconds = output_kwargs["videos_kwargs"].pop("position_id_per_seconds")
@@ -206,13 +222,72 @@ class Qwen2_5OmniProcessor(ProcessorMixin):
             position_id_per_seconds=position_id_per_seconds,
             seconds_per_chunk=seconds_per_chunk,
         )
+       
+        if self.stream:
+            ret_text=[]
+            for tmptext in text:
+                if self.pre_text_prompt:
+                    remove_text="<|im_start|>assistant\n"
+                    system_and_user_prompt = tmptext[:-len(remove_text)]
+                else:
+                    before, mid, after=self.split_audio_tags(tmptext)
+                    remove_text="<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+                    before = before[len(remove_text):]
 
+                new_str = []
+
+                if self.first_slice and not self.end_slice: 
+                    new_str.append(before+mid+"<|audio_eos|>")
+
+                elif self.end_slice and not self.first_slice:
+                    if before == "no audio":
+                        new_str.append( after)
+                    else:    
+                        new_str.append("<|audio_bos|>" + mid + after)
+                
+                #### carl ............ add  for pre_computing ...
+                elif self.pre_text_prompt:
+                    new_str.append(system_and_user_prompt)
+
+                else:
+                    new_str.append("<|audio_bos|>" +mid+ "<|audio_eos|>")
+
+                ret_text.append(new_str[0])
+                       
+            text = ret_text
+        else:
+            ret_text=[]
+            for tmptext in text: 
+                remove_text="<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+                tmptext = tmptext[len(remove_text):]
+                ret_text.append(tmptext)
+            text = ret_text    
+       
         texts_inputs = self.tokenizer(text, **output_kwargs["text_kwargs"])
-
+    
         return BatchFeature(
             data={**texts_inputs, **images_inputs, **videos_inputs, **audio_inputs},
             tensor_type=kwargs.get("return_tensors"),
         )
+
+    #### carl add
+    def split_audio_tags(self,text):
+        first_pos = text.find('<|AUDIO|>')
+        first_pos_user = text.find('user')
+        no_audio = text[first_pos_user+len("user\n"):]
+        if first_pos == -1:
+            return 'no audio', '', no_audio
+
+        last_pos = text.rfind('<|AUDIO|>')
+        last_end = last_pos + len('<|AUDIO|>')
+
+        part1 = text[:first_pos]
+        part2 = text[first_pos:last_end]
+        part3 = text[last_end:]
+
+        return part1, part2, part3
+
+
 
     def replace_multimodal_special_tokens(
         self,
